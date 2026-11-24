@@ -387,6 +387,13 @@ uint class16(uint bits) {
 bool num16(uint bits) {
     return (bits & 0x7fffu) <= 0x7c00u;
 }
+// binary32 comparison key (issue 958): an unsigned key whose order is the IEEE order of every non-NaN binary32,
+// including both infinities and both zeros, which share one key. A driver compiler can bracket an fcmp with
+// s_denorm_mode 14, which reads a subnormal operand as zero; an integer compare gives it nothing to bracket.
+uint key32(uint bits) {
+    bits = (bits & 0x7fffffffu) == 0u ? 0u : bits;
+    return (bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u);
+}
 // v_med3_f32: the median of three. If any operand is NaN, the RDNA 2 ISA returns V_MIN3_F32 of the three, which with
 // IEEE mode off is the smallest operand that is not NaN; desktop min and max alone would skip only the NaN operand.
 // The NaN test is on the encoding, because some desktop compilers fold float NaN tests.
@@ -693,6 +700,11 @@ COMPARE = {
     "nge": "({0} < {1} || isnan({0}) || isnan({1}))", "nlg": "({0} == {1} || isnan({0}) || isnan({1}))",
     "ngt": "({0} <= {1} || isnan({0}) || isnan({1}))", "nle": "({0} > {1} || isnan({0}) || isnan({1}))",
     "neq": "!({0} == {1})", "nlt": "({0} >= {1} || isnan({0}) || isnan({1}))",
+}
+# The six ordered binary32 relations, decided on the key32 encoding order instead of a float comparison (issue 958).
+F32_KEY_COMPARE = {
+    "lt": "{0} < {1}", "eq": "{0} == {1}", "le": "{0} <= {1}",
+    "gt": "{0} > {1}", "lg": "{0} != {1}", "ge": "{0} >= {1}",
 }
 INT_COMPARE = {
     "f": "false", "lt": "{0} < {1}", "eq": "{0} == {1}", "le": "{0} <= {1}",
@@ -2073,16 +2085,34 @@ def fp_operand(token, scalar, vector, pending, sample_dest, *,
 SDWA_NEG_DECIMAL = re.compile(r"^neg\((-?\d+\.\d+)\)$")
 
 
+def f32_compare_word(token, scalar, vector, pending, sample_dest):
+    """The binary32 word of one f32 comparison operand as a uint expression, with neg and abs applied to the word.
+
+    The modifiers are bit operations on the encoding, as in the f16 path, so no float operation is left in the
+    comparison and a denormal flush cannot reach the operand.
+    """
+    word = f"asuint({fp_operand(token, scalar, vector, pending, sample_dest, ignore_sign=True)})"
+    if re.fullmatch(r"-\d+", token):
+        return word  # an integer immediate is the word itself, not a negated value
+    neg = token.startswith("-")
+    if neg:
+        token = token[1:]
+    if re.fullmatch(r"abs\(([^()|]+)\)|\|([^()|]+)\|", token):
+        word = f"({word} & 0x7fffffffu)"
+    if neg:
+        word = f"({word} ^ 0x80000000u)"
+    return word
+
+
 def f32_comparison(op, tokens, scalar, vector, pending, sample_dest):
-    values = [fp_operand(t, scalar, vector, pending, sample_dest) for t in tokens]
-    predicate = COMPARE[op].format(*values)
-    if op not in ("lt", "eq", "le", "gt", "lg", "ge"):
-        return predicate
-    # Inspect the original bits. The sign modifiers preserve NaN classification,
-    # but a backend can fold relations such as -abs(x) <= 2.0 even when x is NaN.
-    bits = [fp_operand(t, scalar, vector, pending, sample_dest, ignore_sign=True) for t in tokens]
-    ordered = " && ".join(f"((asuint({f}) & 0x7fffffffu) <= 0x7f800000u)" for f in bits)
-    return f"({ordered} && ({predicate}))"
+    if op in F32_KEY_COMPARE:
+        # The relation is decided on the words, under the same encoding-level NaN guard: an fcmp is what the
+        # driver compiler can enclose in a flushing s_denorm_mode window, and a key comparison is not one.
+        words = [f32_compare_word(t, scalar, vector, pending, sample_dest) for t in tokens]
+        ordered = " && ".join(f"(({w} & 0x7fffffffu) <= 0x7f800000u)" for w in words)
+        relation = F32_KEY_COMPARE[op].format(*(f"key32({w})" for w in words))
+        return f"({ordered} && ({relation}))"
+    return COMPARE[op].format(*[fp_operand(t, scalar, vector, pending, sample_dest) for t in tokens])
 
 
 def low16_name(token, vector):

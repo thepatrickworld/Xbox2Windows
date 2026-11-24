@@ -12777,7 +12777,9 @@ def check_cmpx_controls():
         assert selects(cmpx_class_group(encoding=encoding)) == 4
         assert selects(cmpx_class_group(kind="f16", encoding=encoding)) == 4
     # The e64 float groups apply both negations, and the third e64 class channel the absolute value.
-    assert re.search(r"\(\(-\w+\) > \(-params\[0\]\.w\)\)", translate(cmpx_predicate_group("f32", 4, "e64")))
+    assert re.search(r"\(key32\(\(asuint\(\w+\) \^ 0x80000000u\)\) > "
+                     r"key32\(\(asuint\(params\[0\]\.w\) \^ 0x80000000u\)\)\)",
+                     translate(cmpx_predicate_group("f32", 4, "e64")))
     assert "abs(" in translate(cmpx_class_group(encoding="e64"))
     for restore in (CMPX_MOV_RESTORE, CMPX_OR_RESTORE):
         assert selects(cmpx_class_region(restore)) == 2
@@ -16168,8 +16170,10 @@ def _check_controls_inline(directory):
     source = translate(select())
     assert translate(select(True)) == source
     for expected in ("(sample16.x >= sample16.y || isnan(sample16.x) || isnan(sample16.y))",
-                     "sample16.x == sample16.y",
-                     "params[0].w < sample16.x", "sample16.y >= params[1].x",
+                     "((asuint(sample16.x) & 0x7fffffffu) <= 0x7f800000u)",
+                     "key32(asuint(sample16.x)) == key32(asuint(sample16.y))",
+                     "key32(asuint(params[0].w)) < key32(asuint(sample16.x))",
+                     "key32(asuint(sample16.y)) >= key32(asuint(params[1].x))",
                      "? 1.0f : asfloat(0u);", "? sample16.w : params[1].z;"):
         assert expected in source, expected
     for wave64 in (False, True):
