@@ -634,6 +634,21 @@ int check_stream_draw(IDXGIAdapter* adapter, void* guest, void* pso, const char*
             invoke(queue, 10, 1, arg(&list));
             if (FAILED(static_cast<HRESULT>(invoke(queue, 14, arg(fence), gate_fence + 2))) || !reached(gate_fence + 2)) return 25;
         }
+        // X2W_TEST_ADDRESS_UPLOAD_RING_UNTRACKED (with X2W_TEST_SUBMIT_FENCE_FAIL=1): no submit fence could be
+        // created, so the stand-in flags every ring chunk these recordings took as untracked instead of tying it
+        // to a fence value. The Reset below discards whatever recording the list still holds, so no recordings
+        // count is left to mask that flag and no chunk can look idle by having no submits either. One more
+        // full-size payload then asks for a reservation the exhausted ring can only serve by recycling such a
+        // chunk: it must be refused.
+        if (GetEnvironmentVariableW(L"X2W_TEST_ADDRESS_UPLOAD_RING_UNTRACKED", nullptr, 0)) {
+            // The reuse control, when it ran above, already took the next fence value.
+            const UINT64 untracked_value = gate_fence + (GetEnvironmentVariableW(L"X2W_TEST_ADDRESS_UPLOAD_RING_REUSE", nullptr, 0) ? 3 : 2);
+            if (!next_recording()) return 35;
+            if (const int result = draw_gated_console_payload(guest, list, payloads + 1, false)) return result;
+            invoke(list, 9);
+            invoke(queue, 10, 1, arg(&list));
+            if (FAILED(static_cast<HRESULT>(invoke(queue, 14, arg(fence), untracked_value))) || !reached(untracked_value)) return 25;
+        }
         return read_stream_target(desktop.Get(), frame, pixels);
     } else if (bc) {
         extern int draw_bc_address_srvs(void*, void*);

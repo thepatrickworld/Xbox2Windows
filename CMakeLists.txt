@@ -4839,6 +4839,14 @@ if(EXISTS "${INTAKE_PYTHON}")
                 "$<TARGET_FILE:startup_stream_consumer>" "${backend}" "${gate}")
             set_tests_properties(startup_address_console_${gate_name}_${backend} PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
         endforeach()
+        # gate-ring-untracked: the same gate with X2W_TEST_SUBMIT_FENCE_FAIL=1, so no chunk the ring served
+        # can be tied to a fence value. Once every submit has run and the recording is discarded (recordings
+        # back to 0), one more full-size payload must still be refused: an untracked chunk is never recycled.
+        add_test(NAME startup_address_console_gate_ring_untracked_${backend} COMMAND "${CMAKE_COMMAND}" -E env
+            "X2W_FXC=${STARTUP_FXC}" "X2W_TEST_SUBMIT_FENCE_FAIL=1"
+            "${INTAKE_PYTHON}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_address_console_check.py"
+            "$<TARGET_FILE:startup_stream_consumer>" "${backend}" "gate-ring-untracked")
+        set_tests_properties(startup_address_console_gate_ring_untracked_${backend} PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
         add_test(NAME startup_xg_bc_chain_${backend} COMMAND "${CMAKE_COMMAND}" -E env "X2W_FXC=${STARTUP_FXC}"
             "${INTAKE_PYTHON}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_xg_bc_chain_check.py"
             "$<TARGET_FILE:startup_stub_xg_xs>" "$<TARGET_FILE:startup_stream_consumer>" "${backend}")

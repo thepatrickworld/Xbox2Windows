@@ -10,6 +10,10 @@
                                      and the left half keeps payload 0
   <consumer> <backend> gate-ring-reuse  gate-ring, then once every submit has completed one more payload from
                                      the ring, which must not be refused
+  <consumer> <backend> gate-ring-untracked  gate-ring under X2W_TEST_SUBMIT_FENCE_FAIL=1, then one more
+                                     full-size payload after the recording was discarded: a chunk whose
+                                     submits were never tracked must not be recycled (described at
+                                     check_gate_ring_untracked)
 
 The backing bytes are built here, independently of src/startup_stubs/gfx10_layout.h, from the address
 equations of AMD addrlib's GFX10 pattern tables, written out below. Reference: addrlib as Mesa carries it
@@ -325,10 +329,66 @@ def check_gate(directory, consumer, backend, ring):
     return 0
 
 
+def check_gate_ring_untracked(directory, consumer, backend):
+    """A chunk the ring served while no submit fence could be tracked must never be recycled.
+
+    The fixture runs the gate-ring draws under X2W_TEST_SUBMIT_FENCE_FAIL=1: note_submits finds no fence to
+    signal, so every chunk those recordings took from the shared ring is flagged untracked instead of being
+    tied to a fence value. Sixteen payloads of 16 MiB fill the 256 MiB ring; the seventeenth and eighteenth
+    are refused, and the only thing holding chunk 0 -- whose recordings count is already back to 0, its
+    recording discarded by the Reset before the next payload -- is that flag.
+
+    The fixture then lets the queue run every submit, resets the list once more so no chunk is recorded any
+    more, and records one more full-size payload. The exhausted ring can only serve it by recycling a chunk,
+    which must not happen: nothing ever recorded the GPU's completion of one. That last draw binds the null
+    view, so the right half stays zero while the left half keeps payload 0.
+    """
+    hlsl = ("Texture2D<float4> t : register(t0);\n"
+            "float4 main(float4 p : SV_Position) : SV_Target {\n"
+            "  return t.Load(int3(uint(p.x) % 2048, uint(p.y) % 2048, 0));\n}\n")
+    trap_log = directory / "trap.log"
+    os.environ.pop("X2W_TEST_ADDRESS_UPLOAD_RING_REUSE", None)
+    modes = {"X2W_TEST_CONSOLE_GATE": "1", "X2W_TRAP_LOG": str(trap_log),
+             "X2W_TEST_ADDRESS_UPLOAD_RING": "1",
+             "X2W_TEST_SUBMIT_FENCE_FAIL": "1"}
+    actual = draw_texture(directory, consumer, backend, hlsl, modes)
+    if actual is None:
+        return 77
+    if len(actual) != TARGET_W * TARGET_H * 4:
+        raise AssertionError(f"gate-ring-untracked: readback length {len(actual)}")
+    first, null = gate_colour(0), bytes(4)
+    wrong = {"left": 0, "right": 0}
+    seen = set()
+    for y in range(TARGET_H):
+        for x in range(TARGET_W):
+            pixel = actual[4 * (y * TARGET_W + x):4 * (y * TARGET_W + x) + 4]
+            side = "left" if x < TARGET_W // 2 else "right"
+            if pixel != (first if side == "left" else null):
+                wrong[side] += 1
+                seen.add(pixel.hex())
+    log = trap_log.read_text(errors="replace")
+    refusals = log.count("x2w-draw upload ring reservation refused: no unused capacity")
+    if wrong["left"] or wrong["right"]:
+        raise AssertionError(f"gate-ring-untracked: {wrong} wrong pixels, found {sorted(seen)[:4]}; expected "
+                             f"{first.hex()} left and the null view right. A chunk whose submit fence was never "
+                             f"tracked was recycled ({refusals} refusals logged)")
+    if not refusals:
+        raise AssertionError("gate-ring-untracked: no upload reservation refusal")
+    half = TARGET_W * TARGET_H // 2
+    print(f"{backend} gate-ring-untracked: the gate payloads filled the ring and {refusals} upload reservations "
+          f"were refused; after the recording was discarded (recordings 0) a full-size reservation was still "
+          f"refused: {half} right pixels read the null view and {half} left pixels hold payload 0, no chunk was recycled")
+    return 0
+
+
 if __name__ == "__main__":
-    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] not in ("gate", "gate-ring", "gate-ring-reuse")):
-        usage = "usage: startup_address_console_check.py <consumer> <backend> [gate | gate-ring | gate-ring-reuse]\n"
+    gates = ("gate", "gate-ring", "gate-ring-reuse", "gate-ring-untracked")
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] not in gates):
+        usage = "usage: startup_address_console_check.py <consumer> <backend> [gate | gate-ring | gate-ring-reuse | gate-ring-untracked]\n"
         sys.exit(usage + "\n\n".join(__doc__.split("\n\n")[:2]))
+    if len(sys.argv) == 4 and sys.argv[3] == "gate-ring-untracked":
+        with tempfile.TemporaryDirectory() as temporary:
+            sys.exit(check_gate_ring_untracked(Path(temporary), sys.argv[1], sys.argv[2]))
     if len(sys.argv) == 4 and sys.argv[3] == "gate-ring-reuse":
         with tempfile.TemporaryDirectory() as temporary:
             sys.exit(check_gate_ring_reuse(Path(temporary), sys.argv[1], sys.argv[2]))
