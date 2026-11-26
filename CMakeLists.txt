@@ -1531,6 +1531,20 @@ endforeach()
 set_tests_properties(startup_indirect_dispatch_hardware startup_indirect_root_constants_hardware startup_indirect_count_hardware
                      startup_indirect_count_split_hardware PROPERTIES SKIP_RETURN_CODE 77)
 
+# The reload path of the split cache (#2734): one process loads d3d12_xs.dll by path, runs the counted
+# Dispatch with X2W_SPLIT_INDIRECT_DISPATCH=1, unloads the module, loads it again and runs the same case on
+# the new image. The fixture does not import the shim, because an import keeps a reference and FreeLibrary
+# would never unmap it; it therefore links d3d12 and dxgi only and resolves the two entry points and the two
+# fixtures probes through GetProcAddress. tests/startup_split_reload.cpp states what the run proves and what
+# it does not.
+add_executable(startup_split_reload tests/startup_split_reload.cpp tests/desktop_gpu.cpp)
+target_compile_features(startup_split_reload PRIVATE cxx_std_17)
+target_link_libraries(startup_split_reload PRIVATE d3d12 dxgi d3dcompiler)
+add_dependencies(startup_split_reload d3d12_xs_shim)
+add_test(NAME startup_split_reload_hardware COMMAND startup_split_reload "$<TARGET_FILE:d3d12_xs_shim>")
+set_tests_properties(startup_split_reload_hardware PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77
+    ENVIRONMENT "X2W_SPLIT_INDIRECT_DISPATCH=1")
+
 # Occlusion queries recorded through command-list slots 28 to 30 reach the readback buffer (#870).
 add_executable(startup_list_queries tests/startup_list_queries.cpp tests/desktop_gpu.cpp)
 target_compile_features(startup_list_queries PRIVATE cxx_std_17)
